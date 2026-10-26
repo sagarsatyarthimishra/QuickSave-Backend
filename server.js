@@ -1,28 +1,29 @@
-const express = require("express");
-const cors = require("cors");
-const { spawn } = require("child_process");
-const { randomUUID } = require("crypto");
-const fs = require("fs");
-const path = require("path");
-require("dotenv").config();
+
+const express = require('express');
+const cors = require('cors');
+const { spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+require('dotenv').config();
 
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: '1mb' }));
 
 const PORT = Number(process.env.PORT || 5000);
-const PYTHON = process.env.PYTHON_COMMAND || "python";
-const OUTPUT_DIR = path.join(__dirname, "downloads");
+const PYTHON = process.env.PYTHON_COMMAND || 'python';
+const OUTPUT_DIR = path.resolve(__dirname, 'downloads');
 
 const MAX_JOBS = 2;
 const JOB_RETENTION = 60 * 60 * 1000;
-const MAX_DURATION = 3 * 60 * 60;
 const DOWNLOAD_TIMEOUT = 30 * 60 * 1000;
-const MAX_FILE_SIZE = "2G";
+const METADATA_TIMEOUT = 60 * 1000;
+const MAX_FILE_SIZE = '2G';
 
-const QUALITIES = [240, 360, 480, 720, 1080, 1440, 2160];
-const VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.webm']);
+const ALLOWED_EXTENSIONS = new Set(['mp4', 'm4v', 'mov', 'webm']);
 
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
@@ -32,8 +33,8 @@ const processes = new Map();
 /* ---------------- URL validation ---------------- */
 
 function identifyVideoUrl(value) {
-  if (typeof value !== "string" || !value.trim()) {
-    return { success: false, message: "Video URL is required." };
+  if (typeof value !== 'string' || !value.trim()) {
+    return { success: false, message: 'Video URL is required.' };
   }
 
   let url;
@@ -41,25 +42,26 @@ function identifyVideoUrl(value) {
   try {
     url = new URL(value.trim());
   } catch {
-    return { success: false, message: "Invalid video URL." };
+    return { success: false, message: 'Invalid video URL.' };
   }
 
-  if (!["http:", "https:"].includes(url.protocol)) {
+  if (!['http:', 'https:'].includes(url.protocol)) {
     return {
       success: false,
-      message: "Only HTTP and HTTPS URLs are supported.",
+      message: 'Only HTTP and HTTPS URLs are supported.',
     };
   }
 
   const host = url.hostname.toLowerCase();
   const domain = (name) => host === name || host.endsWith(`.${name}`);
 
-  // Block local/private IPv4 and common local hostnames.
   const isPrivateIPv4 = (() => {
     const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+
     if (!match) return false;
 
     const octets = match.slice(1).map(Number);
+
     if (octets.some((n) => n < 0 || n > 255)) return true;
 
     const [a, b] = octets;
@@ -77,55 +79,55 @@ function identifyVideoUrl(value) {
   })();
 
   const blockedHost =
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host === "0.0.0.0" ||
-    host === "[::]" ||
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host === '0.0.0.0' ||
+    host === '[::]' ||
     isPrivateIPv4;
 
   if (blockedHost) {
     return {
       success: false,
-      message: "Local or private network URLs are not supported.",
+      message: 'Local or private network URLs are not supported.',
     };
   }
 
   if (
-    domain("facebook.com") ||
-    domain("fb.com") ||
-    domain("fb.watch")
+    domain('facebook.com') ||
+    domain('fb.com') ||
+    domain('fb.watch')
   ) {
     return {
       success: false,
-      platform: "Facebook",
-      message: "Facebook downloads are temporarily disabled.",
+      platform: 'Facebook',
+      message: 'Facebook downloads are temporarily disabled.',
     };
   }
 
   const directVideo = VIDEO_EXTENSIONS.has(
-    path.extname(url.pathname).toLowerCase()
+    path.extname(url.pathname).toLowerCase(),
   );
 
   let platform = null;
 
   if (
-    domain("youtube.com") ||
-    host === "youtu.be" ||
-    domain("youtube-nocookie.com")
+    domain('youtube.com') ||
+    host === 'youtu.be' ||
+    domain('youtube-nocookie.com')
   ) {
-    platform = "YouTube";
-  } else if (domain("instagram.com") || host === "instagr.am") {
-    platform = "Instagram";
+    platform = 'YouTube';
+  } else if (domain('instagram.com') || host === 'instagr.am') {
+    platform = 'Instagram';
   } else if (directVideo) {
-    platform = "Direct Video";
+    platform = 'Direct Video';
   }
 
   if (!platform) {
     return {
       success: false,
-      message: "Unsupported video URL.",
+      message: 'Unsupported video URL.',
     };
   }
 
@@ -137,49 +139,59 @@ function identifyVideoUrl(value) {
   };
 }
 
-/* ---------------- Helpers ---------------- */
+/* ---------------- Format helpers ---------------- */
 
+// For portrait videos, use the smaller dimension as the quality label.
 function getResolution(format) {
   const width = Number(format.width) || 0;
   const height = Number(format.height) || 0;
 
   if (width && height) return Math.min(width, height);
+
   return height || width;
 }
 
 function getQualityLabel(resolution) {
-  for (const quality of [2160, 1440, 1080, 720, 480, 360, 240]) {
-    if (resolution >= quality) return `${quality}p`;
-  }
+  if (resolution >= 2160) return '2160p';
+  if (resolution >= 1440) return '1440p';
+  if (resolution >= 1080) return '1080p';
+  if (resolution >= 720) return '720p';
+  if (resolution >= 480) return '480p';
+  if (resolution >= 360) return '360p';
+  if (resolution >= 240) return '240p';
 
   return `${resolution}p`;
 }
 
 function buildQualityOptions(info) {
-  const formats = (info.formats || [])
+  const candidates = (info.formats || [])
     .filter((format) => {
+      const resolution = getResolution(format);
+
       return (
-        getResolution(format) > 0 &&
+        resolution > 0 &&
         format.vcodec &&
-        format.vcodec !== "none" &&
-        ["mp4", "webm", "mov", "m4v"].includes(format.ext)
+        format.vcodec !== 'none' &&
+        ALLOWED_EXTENSIONS.has(String(format.ext).toLowerCase())
       );
     })
     .sort((a, b) => {
-      const difference = getResolution(b) - getResolution(a);
-      if (difference) return difference;
+      const resolutionDifference = getResolution(b) - getResolution(a);
+
+      if (resolutionDifference) return resolutionDifference;
 
       const mp4Difference =
-        Number(b.ext === "mp4") - Number(a.ext === "mp4");
+        Number(b.ext === 'mp4') - Number(a.ext === 'mp4');
 
       if (mp4Difference) return mp4Difference;
 
       return (Number(b.tbr) || 0) - (Number(a.tbr) || 0);
     });
 
+  // Return only one format per actual resolution.
   const selected = new Map();
 
-  for (const format of formats) {
+  for (const format of candidates) {
     const resolution = getResolution(format);
 
     if (!selected.has(resolution)) {
@@ -198,23 +210,26 @@ function buildQualityOptions(info) {
           : null;
 
       const exact = format.filesize ?? null;
-      const size = exact ?? format.filesize_approx ?? estimated;
+      const approximate = format.filesize_approx ?? null;
+      const size = exact ?? approximate ?? estimated;
 
       return {
         id: String(format.format_id),
-        label: `${getQualityLabel(resolution)} - ${format.ext.toUpperCase()}`,
+        label: `${getQualityLabel(resolution)} - ${String(
+          format.ext,
+        ).toUpperCase()}`,
         resolution,
         width: Number(format.width) || null,
         height: Number(format.height) || null,
-        ext: format.ext,
+        ext: String(format.ext).toLowerCase(),
         sizeBytes: size,
         sizeType:
           exact != null
-            ? "exact"
+            ? 'exact'
             : size != null
-              ? "estimated"
-              : "unknown",
-        hasAudio: Boolean(format.acodec && format.acodec !== "none"),
+              ? 'estimated'
+              : 'unknown',
+        hasAudio: Boolean(format.acodec && format.acodec !== 'none'),
       };
     });
 }
@@ -233,11 +248,13 @@ function publicJob(job) {
     createdAt: job.createdAt,
     completedAt: job.completedAt,
     downloadUrl:
-      job.status === "completed"
+      job.status === 'completed' && job.filePath
         ? `/api/download/${job.id}/file`
         : null,
   };
 }
+
+/* ---------------- File helpers ---------------- */
 
 function findVideoFiles(directory) {
   const found = [];
@@ -251,7 +268,7 @@ function findVideoFiles(directory) {
       found.push(...findVideoFiles(fullPath));
     } else if (
       VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) &&
-      !entry.name.endsWith(".part")
+      !entry.name.endsWith('.part')
     ) {
       try {
         if (fs.statSync(fullPath).size > 0) {
@@ -270,8 +287,8 @@ function isInsideDirectory(directory, filePath) {
   const relative = path.relative(directory, filePath);
 
   return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
+    relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
   );
 }
 
@@ -279,7 +296,7 @@ function removeDirectory(directory) {
   try {
     fs.rmSync(directory, { recursive: true, force: true });
   } catch (error) {
-    console.error("Directory cleanup failed:", error.message);
+    console.error('Directory cleanup failed:', error.message);
   }
 }
 
@@ -296,7 +313,7 @@ function removeJob(id) {
 }
 
 function failJob(job, message, error) {
-  job.status = "failed";
+  job.status = 'failed';
   job.message = message;
   job.error = String(error || message).slice(-3000);
   job.completedAt = Date.now();
@@ -304,6 +321,7 @@ function failJob(job, message, error) {
 
 /* ---------------- Automatic cleanup ---------------- */
 
+// Remove old job folders even if their video was never transferred.
 setInterval(() => {
   const now = Date.now();
 
@@ -318,18 +336,18 @@ setInterval(() => {
 
 /* ---------------- Health ---------------- */
 
-app.get("/api/health", (_req, res) => {
+app.get('/api/health', (_req, res) => {
   res.json({
     success: true,
-    app: "QuickSave Backend",
-    message: "Backend is running.",
-    platforms: ["YouTube", "Instagram", "Direct Video"],
+    app: 'QuickSave Backend',
+    message: 'Backend is running.',
+    platforms: ['YouTube', 'Instagram', 'Direct Video'],
   });
 });
 
 /* ---------------- Validate URL ---------------- */
 
-app.post("/api/validate-url", (req, res) => {
+app.post('/api/validate-url', (req, res) => {
   const result = identifyVideoUrl(req.body?.url);
 
   if (!result.success) {
@@ -348,7 +366,7 @@ app.post("/api/validate-url", (req, res) => {
 
 /* ---------------- Video metadata ---------------- */
 
-app.post("/api/video-info", (req, res) => {
+app.post('/api/video-info', (req, res) => {
   const result = identifyVideoUrl(req.body?.url);
 
   if (!result.success) {
@@ -356,12 +374,12 @@ app.post("/api/video-info", (req, res) => {
   }
 
   const args = [
-    "-m",
-    "yt_dlp",
-    "--ignore-config",
-    "--no-warnings",
-    "--no-playlist",
-    "--dump-single-json",
+    '-m',
+    'yt_dlp',
+    '--ignore-config',
+    '--no-warnings',
+    '--no-playlist',
+    '--dump-single-json',
     result.url,
   ];
 
@@ -380,8 +398,8 @@ app.post("/api/video-info", (req, res) => {
     });
   }
 
-  let stdout = "";
-  let stderr = "";
+  let stdout = '';
+  let stderr = '';
   let settled = false;
 
   const timeout = setTimeout(() => {
@@ -392,11 +410,11 @@ app.post("/api/video-info", (req, res) => {
 
     res.status(504).json({
       success: false,
-      message: "Metadata request timed out. Please try again.",
+      message: 'Metadata request timed out. Please try again.',
     });
-  }, 60_000);
+  }, METADATA_TIMEOUT);
 
-  child.stdout.on("data", (chunk) => {
+  child.stdout.on('data', (chunk) => {
     stdout += chunk.toString();
 
     if (stdout.length > 20 * 1024 * 1024) {
@@ -404,17 +422,17 @@ app.post("/api/video-info", (req, res) => {
     }
   });
 
-  child.stderr.on("data", (chunk) => {
+  child.stderr.on('data', (chunk) => {
     stderr = (stderr + chunk.toString()).slice(-100_000);
   });
 
-  child.on("error", (error) => {
+  child.on('error', (error) => {
     clearTimeout(timeout);
 
     if (settled) return;
     settled = true;
 
-    console.error("Metadata process error:", error.message);
+    console.error('Metadata process error:', error.message);
 
     res.status(500).json({
       success: false,
@@ -422,23 +440,24 @@ app.post("/api/video-info", (req, res) => {
     });
   });
 
-  child.on("close", (code) => {
+  child.on('close', (code) => {
     clearTimeout(timeout);
 
     if (settled) return;
     settled = true;
 
     if (code !== 0) {
-      console.error("Metadata error:", stderr.slice(-3000));
+      console.error('Metadata error:', stderr.slice(-3000));
 
       return res.status(502).json({
         success: false,
         platform: result.platform,
+        title: null,
         formats: [],
         metadataAvailable: false,
         downloadReady: false,
         message:
-          "Could not retrieve video details. The video may be private or unavailable.",
+          'Could not retrieve video details. The video may be private or unavailable.',
       });
     }
 
@@ -449,21 +468,21 @@ app.post("/api/video-info", (req, res) => {
       return res.json({
         success: true,
         platform: result.platform,
-        title: info.title || "Untitled video",
+        title: info.title || 'Untitled video',
         duration: info.duration ?? null,
         formats,
         metadataAvailable: true,
         downloadReady: formats.length > 0,
         message: formats.length
-          ? "Available video qualities retrieved."
-          : "No supported video qualities found.",
+          ? 'Available video qualities retrieved.'
+          : 'No supported video qualities found.',
       });
     } catch (error) {
-      console.error("Metadata parse error:", error.message);
+      console.error('Metadata parse error:', error.message);
 
       return res.status(502).json({
         success: false,
-        message: "Could not parse video metadata.",
+        message: 'Could not parse video metadata.',
       });
     }
   });
@@ -471,26 +490,27 @@ app.post("/api/video-info", (req, res) => {
 
 /* ---------------- Start download ---------------- */
 
-app.post("/api/download", (req, res) => {
+app.post('/api/download', (req, res) => {
   const result = identifyVideoUrl(req.body?.url);
 
   if (!result.success) {
     return res.status(400).json(result);
   }
 
+  // Accept a positive numeric resolution, including resolutions such as 144p.
   const quality = Number(req.body?.quality ?? 720);
 
-  if (!Number.isInteger(quality) || !QUALITIES.includes(quality)) {
+  if (!Number.isInteger(quality) || quality < 1 || quality > 4320) {
     return res.status(400).json({
       success: false,
-      message: "Choose a supported quality.",
+      message: 'Invalid video quality.',
     });
   }
 
   if (processes.size >= MAX_JOBS) {
     return res.status(429).json({
       success: false,
-      message: "Two downloads are already running. Try again shortly.",
+      message: 'Two downloads are already running. Try again shortly.',
     });
   }
 
@@ -509,14 +529,14 @@ app.post("/api/download", (req, res) => {
   const job = {
     id,
     jobDir,
-    status: "queued",
+    status: 'queued',
     progress: 0,
     title: null,
     platform: result.platform,
     quality,
     fileName: null,
     filePath: null,
-    message: "Download queued.",
+    message: 'Download queued.',
     error: null,
     createdAt: Date.now(),
     completedAt: null,
@@ -524,37 +544,35 @@ app.post("/api/download", (req, res) => {
 
   jobs.set(id, job);
 
-  // Use the real title and video ID in the saved filename.
   const outputTemplate = path.join(
     jobDir,
-    "%(title).180B [%(id)s].%(ext)s"
+    '%(title).180B [%(id)s].%(ext)s',
   );
 
+  // Select the best format at or below the requested resolution.
   const formatSelector = result.directVideo
-    ? "bestvideo*+bestaudio/best"
+    ? 'bestvideo*+bestaudio/best'
     : `bv*[height<=${quality}]+ba/b[height<=${quality}]/bv*[width<=${quality}]+ba/b`;
 
-  // Intentionally no --match-filter duration check:
-  // Instagram can omit duration metadata for some posts.
   const args = [
-    "-m",
-    "yt_dlp",
-    "--ignore-config",
-    "--no-warnings",
-    "--no-playlist",
-    "--newline",
-    "--max-filesize",
+    '-m',
+    'yt_dlp',
+    '--ignore-config',
+    '--no-warnings',
+    '--no-playlist',
+    '--newline',
+    '--max-filesize',
     MAX_FILE_SIZE,
-    "-f",
+    '-f',
     formatSelector,
-    "--merge-output-format",
-    "mp4",
-    "--output",
+    '--merge-output-format',
+    'mp4',
+    '--output',
     outputTemplate,
-    "--print",
-    "after_move:QS_FILE:%(filepath)s",
-    "--progress-template",
-    "download:QS_PROGRESS:%(progress._percent_str)s",
+    '--print',
+    'after_move:QS_FILE:%(filepath)s',
+    '--progress-template',
+    'download:QS_PROGRESS:%(progress._percent_str)s',
     result.url,
   ];
 
@@ -567,7 +585,8 @@ app.post("/api/download", (req, res) => {
       shell: false,
     });
   } catch (error) {
-    failJob(job, "Could not start the downloader.", error.message);
+    failJob(job, 'Could not start the downloader.', error.message);
+
     return res.status(500).json({
       success: false,
       message: job.message,
@@ -576,19 +595,19 @@ app.post("/api/download", (req, res) => {
   }
 
   processes.set(id, child);
-  job.status = "downloading";
-  job.message = "Starting download...";
+  job.status = 'downloading';
+  job.message = 'Starting download...';
 
-  let stdoutBuffer = "";
-  let stderrBuffer = "";
-  let stderr = "";
+  let stdoutBuffer = '';
+  let stderrBuffer = '';
+  let stderr = '';
   let finished = false;
 
   const timeout = setTimeout(() => {
     if (finished) return;
 
-    job.message = "Download timed out.";
-    job.error = "The download exceeded the 30-minute time limit.";
+    job.message = 'Download timed out.';
+    job.error = 'The download exceeded the 30-minute time limit.';
 
     try {
       child.kill();
@@ -602,19 +621,19 @@ app.post("/api/download", (req, res) => {
 
     if (!line) return;
 
-    if (line.includes("QS_PROGRESS:")) {
+    if (line.includes('QS_PROGRESS:')) {
       const value = parseFloat(
-        line.split("QS_PROGRESS:").pop().replace("%", "").trim()
+        line.split('QS_PROGRESS:').pop().replace('%', '').trim(),
       );
 
       if (Number.isFinite(value)) {
         job.progress = Math.max(0, Math.min(99, value));
-        job.message = "Downloading video...";
+        job.message = 'Downloading video...';
       }
     }
 
-    if (line.includes("QS_FILE:")) {
-      const fileValue = line.split("QS_FILE:").pop().trim();
+    if (line.includes('QS_FILE:')) {
+      const fileValue = line.split('QS_FILE:').pop().trim();
       const candidate = path.resolve(fileValue);
 
       if (isInsideDirectory(jobDir, candidate)) {
@@ -623,15 +642,15 @@ app.post("/api/download", (req, res) => {
     }
 
     if (
-      line.includes("Merging formats") ||
-      line.includes("Merger") ||
-      line.includes("Merging audio")
+      line.includes('Merging formats') ||
+      line.includes('Merger') ||
+      line.includes('Merging audio')
     ) {
-      job.message = "Merging audio and video...";
+      job.message = 'Merging audio and video...';
     }
 
-    if (line.includes("[download] Destination:")) {
-      job.message = "Downloading video...";
+    if (line.includes('[download] Destination:')) {
+      job.message = 'Downloading video...';
     }
   }
 
@@ -643,31 +662,35 @@ app.post("/api/download", (req, res) => {
       handleLine(line);
     }
 
-    return lines[lines.length - 1] || "";
+    return lines[lines.length - 1] || '';
   }
 
-  child.stdout.on("data", (chunk) => {
+  child.stdout.on('data', (chunk) => {
     stdoutBuffer = processOutput(stdoutBuffer, chunk);
   });
 
-  child.stderr.on("data", (chunk) => {
+  child.stderr.on('data', (chunk) => {
     stderr = (stderr + chunk.toString()).slice(-100_000);
     stderrBuffer = processOutput(stderrBuffer, chunk);
   });
 
-  child.on("error", (error) => {
+  child.on('error', (error) => {
     if (finished) return;
 
     finished = true;
     clearTimeout(timeout);
     processes.delete(id);
 
-    failJob(job, "Could not start yt-dlp. Check Python installation.", error.message);
+    failJob(
+      job,
+      'Could not start yt-dlp. Check Python installation.',
+      error.message,
+    );
 
-    console.error("Download process error:", error.message);
+    console.error('Download process error:', error.message);
   });
 
-  child.on("close", (code) => {
+  child.on('close', (code) => {
     if (finished) return;
 
     finished = true;
@@ -678,7 +701,6 @@ app.post("/api/download", (req, res) => {
 
     processes.delete(id);
 
-    // Always search this job's folder after yt-dlp exits.
     if (code === 0) {
       try {
         const files = findVideoFiles(jobDir);
@@ -692,7 +714,7 @@ app.post("/api/download", (req, res) => {
         }
       } catch (error) {
         job.filePath = null;
-        console.error("File detection error:", error.message);
+        console.error('File detection error:', error.message);
       }
     }
 
@@ -702,21 +724,24 @@ app.post("/api/download", (req, res) => {
       fs.existsSync(job.filePath) &&
       isInsideDirectory(jobDir, job.filePath)
     ) {
-      job.status = "completed";
+      job.status = 'completed';
       job.progress = 100;
       job.fileName = path.basename(job.filePath);
-      job.title = path.basename(job.filePath, path.extname(job.filePath));
-      job.message = "Download completed.";
+      job.title = path.basename(
+        job.filePath,
+        path.extname(job.filePath),
+      );
+      job.message = 'Download completed.';
       job.error = null;
       job.completedAt = Date.now();
 
-      console.log("Download completed:", job.fileName);
+      console.log('Download completed:', job.fileName);
     } else {
-      job.status = "failed";
+      job.status = 'failed';
       job.message =
-        job.message === "Download timed out."
-          ? "Download timed out."
-          : "Download failed.";
+        job.message === 'Download timed out.'
+          ? 'Download timed out.'
+          : 'Download failed.';
 
       if (!job.error) {
         job.error =
@@ -733,19 +758,19 @@ app.post("/api/download", (req, res) => {
   return res.status(202).json({
     success: true,
     job: publicJob(job),
-    message: "Download job started.",
+    message: 'Download job started.',
   });
 });
 
 /* ---------------- Get download status ---------------- */
 
-app.get("/api/download/:id", (req, res) => {
+app.get('/api/download/:id', (req, res) => {
   const job = jobs.get(req.params.id);
 
   if (!job) {
     return res.status(404).json({
       success: false,
-      message: "Download job not found or expired.",
+      message: 'Download job not found or expired.',
     });
   }
 
@@ -755,71 +780,92 @@ app.get("/api/download/:id", (req, res) => {
   });
 });
 
-/* ---------------- Download saved file ---------------- */
+/* ---------------- Download file and clean up server copy ---------------- */
 
-app.get("/api/download/:id/file", (req, res) => {
+app.get('/api/download/:id/file', (req, res) => {
   const job = jobs.get(req.params.id);
 
   if (!job) {
     return res.status(404).json({
       success: false,
-      message: "Download job not found or expired.",
+      message: 'Download job not found or expired.',
     });
   }
 
-  if (job.status !== "completed" || !job.filePath) {
+  if (job.status !== 'completed' || !job.filePath) {
     return res.status(409).json({
       success: false,
-      message: "The video is not ready yet.",
+      message: 'The video is not ready yet.',
       status: job.status,
     });
   }
 
   const filePath = path.resolve(job.filePath);
+  const jobDir = job.jobDir;
 
-  if (!isInsideDirectory(job.jobDir, filePath) || !fs.existsSync(filePath)) {
+  if (
+    !isInsideDirectory(jobDir, filePath) ||
+    !fs.existsSync(filePath)
+  ) {
     return res.status(404).json({
       success: false,
-      message: "Downloaded file not found.",
+      message: 'Downloaded file not found.',
     });
   }
 
-  return res.download(filePath, job.fileName, (error) => {
-    if (error && !res.headersSent) {
-      console.error("File response error:", error.message);
-      res.status(500).json({
-        success: false,
-        message: "Could not send the downloaded file.",
-      });
+  let cleaned = false;
+
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+
+    // Remove the complete per-job directory after the transfer ends.
+    removeDirectory(jobDir);
+
+    // Keep job status available briefly, but clear its file reference.
+    job.filePath = null;
+    job.message = 'File transfer finished; server copy cleaned up.';
+    job.completedAt = Date.now();
+  };
+
+  res.download(filePath, job.fileName, (error) => {
+    cleanup();
+
+    if (error) {
+      console.error('File response error:', error.message);
     }
   });
 });
 
-/* ---------------- Cancel download ---------------- */
+/* ---------------- Cancel download or remove job ---------------- */
 
-app.delete("/api/download/:id", (req, res) => {
+app.delete('/api/download/:id', (req, res) => {
   const job = jobs.get(req.params.id);
 
   if (!job) {
     return res.status(404).json({
       success: false,
-      message: "Download job not found or expired.",
+      message: 'Download job not found or expired.',
     });
   }
 
   const child = processes.get(job.id);
 
   if (child) {
-    job.status = "failed";
-    job.message = "Download cancelled.";
-    job.error = "Cancelled by user.";
+    job.status = 'failed';
+    job.message = 'Download cancelled.';
+    job.error = 'Cancelled by user.';
     job.completedAt = Date.now();
 
-    child.kill();
+    try {
+      child.kill();
+    } catch {
+      // Process may already have exited.
+    }
 
     return res.json({
       success: true,
-      message: "Download cancellation requested.",
+      message: 'Download cancellation requested.',
       job: publicJob(job),
     });
   }
@@ -828,7 +874,7 @@ app.delete("/api/download/:id", (req, res) => {
 
   return res.json({
     success: true,
-    message: "Download job removed.",
+    message: 'Download job removed.',
   });
 });
 
@@ -837,12 +883,12 @@ app.delete("/api/download/:id", (req, res) => {
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: "API endpoint not found.",
+    message: 'API endpoint not found.',
   });
 });
 
 app.use((error, req, res, next) => {
-  console.error("Server error:", error.message);
+  console.error('Server error:', error.message);
 
   if (res.headersSent) {
     return next(error);
@@ -850,13 +896,13 @@ app.use((error, req, res, next) => {
 
   return res.status(500).json({
     success: false,
-    message: "Internal server error.",
+    message: 'Internal server error.',
   });
 });
 
 /* ---------------- Start server ---------------- */
 
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`QuickSave Backend running on port ${PORT}`);
   console.log(`Downloads directory: ${OUTPUT_DIR}`);
   console.log(`Python command: ${PYTHON}`);
